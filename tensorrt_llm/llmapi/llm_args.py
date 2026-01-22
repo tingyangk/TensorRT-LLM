@@ -116,19 +116,40 @@ class CudaGraphConfig(StrictBaseModel):
     max_batch_size: int = Field(
         default=0, description="Maximum batch size for CUDA graphs.")
 
+    # Encoder CUDA graph settings: total number of tokens and max sequence length.
+    # These are only used for encoder-only models (e.g. BERT, reward models).
+    num_tokens: Optional[List[int]] = Field(
+        default=None,
+        description=
+        "List of total token counts to create encoder CUDA graphs for. "
+        "Only used for encoder-only models (e.g. BERT, reward models).")
+
+    max_num_token: int = Field(
+        default=0, description="Maximum total number of tokens for encoder CUDA graphs.")
+
+    seq_lens: Optional[List[int]] = Field(
+        default=None,
+        description=
+        "List of max per-request sequence lengths to create encoder CUDA graphs for. "
+        "Only used for encoder-only models (e.g. BERT, reward models).")
+
+    max_seq_len: int = Field(
+        default=0, description="Maximum per-request sequence length for encoder CUDA graphs.")
+
     enable_padding: bool = Field(
         default=False,
         description=
         "If true, batches are rounded up to the nearest cuda_graph_batch_size. This is usually a net win for performance."
     )
 
-    @field_validator('max_batch_size')
+    @field_validator('max_batch_size', 'max_num_token', 'max_seq_len')
     @classmethod
-    def validate_cuda_graph_max_batch_size(cls, v):
-        """Validate cuda_graph_config.max_batch_size is non-negative."""
+    def validate_cuda_graph_non_negative(cls, v):
+        """Validate cuda_graph_config scalar fields are non-negative."""
         if v < 0:
             raise ValueError(
-                "cuda_graph_config.max_batch_size must be non-negative")
+                "cuda_graph_config max_batch_size, max_num_token, and "
+                "max_seq_len must be non-negative")
         return v
 
     @staticmethod
@@ -162,6 +183,79 @@ class CudaGraphConfig(StrictBaseModel):
             batch_sizes.append(max_batch_size)
 
         return batch_sizes
+
+    @staticmethod
+    def _generate_cuda_graph_num_tokens(max_num_tokens: int,
+                                        enable_padding: bool) -> List[int]:
+        """Generate a list of total token counts for encoder CUDA graphs.
+
+        Args:
+            max_num_tokens: Maximum total tokens to generate up to
+            enable_padding: Whether padding is enabled, which affects the size distribution.
+
+        Returns:
+            List of total token counts to create encoder CUDA graphs for.
+        """
+        if enable_padding:
+            # Coarser: aligned with piecewise CUDA graph capture sizes.
+            sizes = [2**i for i in range(8)]  # 1, 2, 4 .. 128
+            sizes += list(range(256, 3073, 256))  # 256, 512, ..., 3072
+        else:
+            # Finer: progressively coarser steps.
+            sizes = [2**i for i in range(5)]  # 1, 2, 4 .. 16
+            sizes += list(range(16, 65, 16))  # 16,32, ..., 64
+            sizes += list(range(96, 257, 32))  # 96, 128, ..., 256
+            sizes += list(range(384, 1025, 128))  # 384, 512, ..., 1024
+            sizes += list(range(1280, 3073, 256))  # 1280, 1536, ..., 3072
+
+        # Beyond the base range: powers of 2 up to max_num_tokens.
+        p = 4096
+        while p < max_num_tokens:
+            sizes.append(p)
+            p *= 2
+
+        sizes = sorted(set(s for s in sizes if s <= max_num_tokens))
+        if not sizes or sizes[-1] != max_num_tokens:
+            sizes.append(max_num_tokens)
+
+        return sizes
+
+    @staticmethod
+    def _generate_cuda_graph_seq_lens(max_seq_len: int,
+                                      enable_padding: bool) -> List[int]:
+        """Generate a list of max per-request sequence lengths for encoder
+        CUDA graphs.
+
+        Args:
+            max_seq_len: Maximum per-request sequence length to generate up to
+            enable_padding: Whether padding is enabled, which affects the size distribution.
+
+        Returns:
+            List of max sequence lengths to create encoder CUDA graphs for.
+        """
+        if enable_padding:
+            # Coarser buckets for rounding up.
+            sizes = [2**i for i in range(7)]  # 1, 2, 4 .. 64
+            sizes += list(range(128, 1025, 128))  # 128, 256, ..., 1024
+        else:
+            # Finer: progressive steps for exact matching.
+            sizes = list(range(1, 9))  # 1 .. 8
+            sizes += list(range(16, 65, 8))  # 16, 24, ..., 64
+            sizes += list(range(96, 257, 32))  # 96, 128, ..., 256
+            sizes += list(range(320, 513, 64))  # 320, 384, 448, 512
+            sizes += list(range(640, 1025, 128))  # 640, 768, 896, 1024
+
+        # Beyond the base range: powers of 2 up to max_seq_len.
+        p = 2048
+        while p < max_seq_len:
+            sizes.append(p)
+            p *= 2
+
+        sizes = sorted(set(s for s in sizes if s <= max_seq_len))
+        if not sizes or sizes[-1] != max_seq_len:
+            sizes.append(max_seq_len)
+
+        return sizes
 
 
 class GuidedDecodingConfig(StrictBaseModel):
@@ -3149,6 +3243,61 @@ class TorchLlmArgs(BaseLlmArgs):
                 max_batch_size, config.enable_padding)
             config.batch_sizes = generated_sizes
             config.max_batch_size = max_batch_size
+
+        # Validate encoder CUDA graph num_tokens / max_num_token.
+        if config.num_tokens:
+            config.num_tokens = sorted(config.num_tokens)
+            if config.max_num_token != 0:
+                if config.num_tokens != CudaGraphConfig._generate_cuda_graph_num_tokens(
+                        config.max_num_token, config.enable_padding):
+                    raise ValueError(
+                        "Please don't set both cuda_graph_config.num_tokens "
+                        "and cuda_graph_config.max_num_token.\n"
+                        f"cuda_graph_config.num_tokens: {config.num_tokens}, "
+                        f"cuda_graph_config.max_num_token: {config.max_num_token}"
+                    )
+            else:
+                config.max_num_token = max(config.num_tokens)
+        # Don't generate num_tokens if max_num_token is not provided
+        # (e.g. for decoder models that use generation cuda graphs).
+        elif config.max_num_token > 0:
+            max_num_token = config.max_num_token
+            generated_num_tokens = CudaGraphConfig._generate_cuda_graph_num_tokens(
+                max_num_token, config.enable_padding)
+            config.num_tokens = generated_num_tokens
+            config.max_num_token = max_num_token
+        else:
+            logger.info(
+                "Please set either cuda_graph_config.num_tokens or cuda_graph_config.max_num_token "
+                "if you want to enable encoder CUDA graph.\n"
+            )
+
+        # Validate encoder CUDA graph seq_lens / max_seq_len.
+        if config.seq_lens:
+            config.seq_lens = sorted(config.seq_lens)
+            if config.max_seq_len != 0:
+                if config.seq_lens != CudaGraphConfig._generate_cuda_graph_seq_lens(
+                        config.max_seq_len, config.enable_padding):
+                    raise ValueError(
+                        "Please don't set both cuda_graph_config.seq_lens "
+                        "and cuda_graph_config.max_seq_len.\n"
+                        f"cuda_graph_config.seq_lens: {config.seq_lens}, "
+                        f"cuda_graph_config.max_seq_len: {config.max_seq_len}")
+            else:
+                config.max_seq_len = max(config.seq_lens)
+        # Don't generate seq_lens if max_seq_len is not provided
+        # (e.g. for decoder models that use generation cuda graphs).
+        elif config.max_seq_len > 0:
+            max_seq_len = config.max_seq_len
+            generated_seq_lens = CudaGraphConfig._generate_cuda_graph_seq_lens(
+                max_seq_len, config.enable_padding)
+            config.seq_lens = generated_seq_lens
+            config.max_seq_len = max_seq_len
+        else:
+            logger.info(
+                "Please set either cuda_graph_config.seq_lens or cuda_graph_config.max_seq_len "
+                "if you want to enable encoder CUDA graph.\n"
+            )
 
         return self
 

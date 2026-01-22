@@ -180,6 +180,7 @@ class TrtllmAttentionWrapper:
         context_lengths: torch.Tensor = ...,
         host_context_lengths: torch.Tensor = ...,
         host_request_types: torch.Tensor = ...,
+        max_context_q_len_override: Optional[int] = None,
         kv_cache_block_offsets: Optional[torch.Tensor] = None,
         host_kv_cache_block_offsets: Optional[torch.Tensor] = None,
         host_kv_cache_pool_pointers: Optional[torch.Tensor] = None,
@@ -283,6 +284,7 @@ class TrtllmAttentionWrapper:
         self.context_lengths = context_lengths
         self.host_context_lengths = host_context_lengths
         self.host_request_types = host_request_types
+        self.max_context_q_len_override = max_context_q_len_override
         self.kv_cache_block_offsets = kv_cache_block_offsets
         self.host_kv_cache_block_offsets = host_kv_cache_block_offsets
         self.host_kv_cache_pool_pointers = host_kv_cache_pool_pointers
@@ -510,6 +512,7 @@ class TrtllmAttentionWrapper:
             self.context_lengths,
             self.host_context_lengths,
             self.host_request_types,
+            self.max_context_q_len_override,
             self.kv_cache_block_offsets,
             self.host_kv_cache_block_offsets,
             self.host_kv_cache_pool_pointers,
@@ -641,6 +644,9 @@ class TrtllmAttentionMetadata(AttentionMetadata):
     # TrtllmAttention needs to know the max sequence length.
     # Implemented as a property to support no cache mode.
     max_seq_len: Optional[int]
+
+    # For encoder-only model's cuda graph compatibility
+    max_context_q_len_override: Optional[int] = None
 
     # Storage for internal max_seq_len value
     _max_seq_len_storage: Optional[int] = field(default=None,
@@ -1016,6 +1022,27 @@ class TrtllmAttentionMetadata(AttentionMetadata):
         self.prompt_lens_cpu_runtime = self.prompt_lens_cpu[:self.num_seqs]
         self.host_request_types_runtime = self.host_request_types[:self.
                                                                   num_seqs]
+
+    def prepare_encoder_only(self) -> None:
+        """Fast path for encoder-only CUDA graph replay.
+
+        Assumes kv_cache_params, host_request_types, host_total_kv_lens[1],
+        and kv_cache_block_offsets are already set once at capture time by the
+        full prepare(). Only seq_lens changes between replays; _seq_lens_cuda
+        is already updated by the seq_lens setter before this is called.
+        """
+        extra_attrs = get_model_extra_attrs()
+        if extra_attrs is None:
+            get_global_attrs().attention_metadata = weakref.ref(self)
+
+        n = self.num_seqs
+        self.host_total_kv_lens[0] = self._num_tokens
+
+        self.kv_lens_cuda_runtime = self._seq_lens_cuda[:n]
+        self.kv_lens_runtime = self._seq_lens[:n]
+        self.prompt_lens_cuda_runtime = self._seq_lens_cuda[:n]
+        self.prompt_lens_cpu_runtime = self._seq_lens[:n]
+        self.host_request_types_runtime = self.host_request_types[:n]
 
     def prepare_flash_mla(self) -> None:
         block_ids_per_seq = self.kv_cache_manager.get_block_ids_per_seq(
@@ -1722,6 +1749,7 @@ class TrtllmAttention(AttentionBackend[TrtllmAttentionMetadata]):
             context_lengths=metadata.prompt_lens_cuda_runtime,
             host_context_lengths=metadata.prompt_lens_cpu_runtime,
             host_request_types=metadata.host_request_types_runtime,
+            max_context_q_len_override=metadata.max_context_q_len_override,
             kv_cache_block_offsets=metadata.kv_cache_block_offsets,
             host_kv_cache_block_offsets=metadata.host_kv_cache_block_offsets,
             host_kv_cache_pool_pointers=metadata.host_kv_cache_pool_pointers,

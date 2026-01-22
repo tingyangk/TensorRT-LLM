@@ -7,6 +7,7 @@ import torch
 
 from tensorrt_llm.llmapi.llm_args import (BaseSparseAttentionConfig,
                                           DecodingBaseConfig)
+from tensorrt_llm.logger import logger
 from tensorrt_llm.mapping import Mapping
 
 from ...inputs.multimodal import MultimodalParams
@@ -17,15 +18,59 @@ from ..modules.multi_stream_utils import with_multi_stream
 from ..speculative.eagle3 import Eagle3ResourceManager
 from ..speculative.mtp import SampleStateTensorsMTP
 from ..utils import make_weak_ref, piecewise_cuda_graph
-from .llm_request import get_draft_token_length
+from .llm_request import LlmRequest, SamplingConfig, get_draft_token_length
+from tensorrt_llm.sampling_params import SamplingParams
 from .resource_manager import (BaseResourceManager, ResourceManager,
                                ResourceManagerType)
+from ..attention_backend.trtllm import TrtllmAttentionMetadata
 from .sampler import SampleStateTensors
 from .scheduler import ScheduledRequests
 
 # A large prime number used for dummy request IDs to avoid collisions
 CUDA_GRAPH_DUMMY_REQUEST_ID = (1 << 64) - 1
 KeyType: TypeAlias = Tuple[int, int, bool, bool]
+
+
+@dataclass
+class EncoderCUDAGraphRunnerConfig:
+    """
+    Configuration for the EncoderCUDAGraphRunner.
+    
+    Encoder-only models (like BERT) need different graph keying than decoders
+    since they process variable-length sequences without autoregressive generation.
+    
+    Attributes:
+        use_cuda_graph: Master switch for CUDA graph execution. When False, forces
+            eager mode. When True, the runner checks eligibility and uses graphs
+            when possible, falling back to eager mode when not.
+        cuda_graph_padding_enabled: When True, batches/sequences are padded to the
+            nearest supported size. When False, only exact matches use graphs.
+            Disabling this avoids padding overhead but may result in more eager fallbacks.
+        cuda_graph_batch_sizes: List of batch sizes to capture graphs for.
+        cuda_graph_num_tokens: List of total number of tokens to capture graphs for.
+        cuda_graph_max_seq_len: List of maximum sequence length per request to capture graphs for.
+        max_cuda_graph_batch_size: Maximum batch size for CUDA graphs.
+        max_cuda_graph_num_tokens: Maximum total number of tokens for CUDA graphs.
+        max_cuda_graph_max_seq_len: Maximum maximum sequence length per request for CUDA graphs.
+        max_num_tokens: Maximum total tokens (batch_size * seq_len limit).
+        cuda_graph_mem_pool: Shared CUDA memory pool for graph capture.
+        use_token_type_ids: Whether to allocate static buffer for token_type_ids.
+            Only needed for models like BERT that use segment embeddings.
+            Set to False for mm_encoder_only models to avoid memory overhead.
+    """
+    use_cuda_graph: bool
+    cuda_graph_padding_enabled: bool
+    cuda_graph_batch_sizes: list[int]
+    cuda_graph_num_tokens: list[int]
+    cuda_graph_seq_lens: list[int]
+    max_cuda_graph_batch_size: int
+    max_cuda_graph_num_tokens: int
+    max_num_tokens: int
+    cuda_graph_mem_pool: Any
+    use_token_type_ids: bool
+    enable_attention_dp: bool
+    mapping: Optional[Mapping]
+    dist: Optional[MPIDist]
 
 
 @dataclass
@@ -77,6 +122,339 @@ class CUDAGraphRunnerConfig:
     dist: Optional[MPIDist]
     kv_cache_manager_key: Any
     sparse_attention_config: Optional[BaseSparseAttentionConfig] = None
+
+
+class EncoderCUDAGraphRunner:
+    """
+    CUDA graph runner for encoder-only models (e.g., BERT, RoBERTa).
+    
+    Encoder models key graphs by (batch_size, total_seq_len, max_context_q_len) since:
+    1. All tokens are processed in a single forward pass (no generation steps)
+    2. Sequence lengths can vary between batches
+    3. No KV cache is used
+    
+    This runner handles three execution paths (similar to CUDAGraphRunner):
+    
+    1. **Pure Eager Path** (enabled=False):
+       - All execution in eager mode
+       - `maybe_get_cuda_graph` returns None, signaling eager fallback
+       
+    2. **Eager Fallback Path** (enabled=True, but ineligible batch):
+       - Runner checks eligibility based on batch_size and seq_len
+       - Falls back to eager if batch doesn't match supported sizes
+       
+    3. **CUDA Graph Path** (enabled=True, eligible batch):
+       - Graph is captured (if new) or replayed (if exists)
+    
+    This runner handles:
+    - Static input buffer allocation for capture/replay
+    - Padding batches and sequences to graph-compatible sizes
+    - Graph keying by (padded_batch_size, padded_num_tokens, padded_max_seq_len)
+    """
+    
+    WARMUP_STEPS = 2
+    
+    def __init__(self, config: EncoderCUDAGraphRunnerConfig):
+        self.config = config
+        
+        # High-level configuration
+        self.enabled = config.use_cuda_graph
+        self.padding_enabled = config.cuda_graph_padding_enabled
+        self.supported_batch_sizes = sorted(config.cuda_graph_batch_sizes)
+        self.max_supported_batch_size = config.max_cuda_graph_batch_size
+        self.supported_num_tokens = sorted(config.cuda_graph_num_tokens)
+        self.max_supported_num_tokens = config.max_cuda_graph_num_tokens
+        self.supported_seq_lens = sorted(config.cuda_graph_seq_lens)
+        
+        # Graph storage - keyed by (padded_batch_size, padded_num_tokens, padded_max_seq_len)
+        self.graphs: Dict[Tuple[int, int, int], torch.cuda.CUDAGraph] = {}
+        self.graph_outputs: Dict[Tuple[int, int, int], Callable[[], Optional[torch.Tensor]]] = {}
+        self.graph_metadata: Dict[Tuple[int, int, int], Dict[str, Any]] = {}
+        self.memory_pool = config.cuda_graph_mem_pool
+        
+        # Reusable dummy request for batch padding
+        self.padding_dummy_request: Optional[LlmRequest] = None
+
+        # Static tensors for graph capture/replay
+        self.shared_static_tensors: Dict[str, torch.Tensor] = {}
+        if self.enabled:
+            self._create_shared_static_tensors()
+        self.cuda_graph_meta_buffers = get_memory_buffers()
+    
+    def _create_shared_static_tensors(self):
+        """Allocates static tensors sized for the max supported number of tokens."""
+        max_total_tokens = min(self.max_supported_num_tokens, self.config.max_num_tokens)
+
+        self.shared_static_tensors = {
+            "input_ids": torch.ones((max_total_tokens,), device="cuda", dtype=torch.int32),
+            "position_ids": torch.zeros((1, max_total_tokens), device="cuda", dtype=torch.int32),
+        }
+
+        if self.config.use_token_type_ids:
+            self.shared_static_tensors["token_type_ids"] = torch.zeros(
+                (max_total_tokens, ), device="cuda", dtype=torch.int32)
+    
+    def get_graph_key(self, batch: ScheduledRequests) -> Tuple[int, int, int]:
+        """Compute the encoder CUDA graph key.
+
+        batch_size is already padded by pad_batch, so no round-up needed.
+        Only num_tokens and max_seq_len are rounded up here.
+        """
+        num_tokens = 0
+        max_seq_len = 0
+        for request in batch.context_requests:
+            seq_len = len(request.get_tokens(0))
+            num_tokens += seq_len
+            max_seq_len = max(max_seq_len, seq_len)
+
+        # batch_size is already padded by pad_batch, so no round-up needed.
+        padded_batch_size = batch.batch_size
+        padded_num_tokens = self._round_up(num_tokens, self.supported_num_tokens)
+        padded_max_seq_len = self._round_up(max_seq_len, self.supported_seq_lens)
+
+        is_padding_performed = (padded_num_tokens != num_tokens or
+                                padded_max_seq_len != max_seq_len)
+        is_padding_successful = (padded_num_tokens != 0 and
+                                 padded_max_seq_len != 0)
+
+        return (padded_batch_size, padded_num_tokens, padded_max_seq_len), is_padding_performed, is_padding_successful
+
+    @staticmethod
+    def _round_up(value: int, supported: list[int]) -> int:
+        """Finds the smallest value in `supported` >= `value`. Returns 0 if none."""
+        if not supported:
+            return 0
+        idx = bisect.bisect_left(supported, value)
+        if idx == len(supported):
+            return 0
+        return supported[idx]
+    
+    def maybe_get_cuda_graph(
+        self,
+        batch: ScheduledRequests,
+        attn_metadata: Any,
+        spec_metadata: Optional[Any] = None,
+    ) -> Tuple[Optional[Any], Optional[Tuple[int, int]]]:
+        """
+        Determine if the current batch can use a CUDA graph.
+        
+        Returns:
+            Tuple of (attn_metadata, graph_key) if graph can be used,
+            (None, None) otherwise.
+        """
+        # A sanity check, flashinfer attention backend doesn't support kv_cache_manager = None
+        if not isinstance(attn_metadata, TrtllmAttentionMetadata):
+            logger.warning("Encoder CUDA graph only supports TrtllmAttentionMetadata for now")
+            return None, None
+        
+        # disable when doing statistic
+        if ExpertStatistic.should_record():
+            return None, None
+
+        can_run_encoder_cuda_graph = not batch.generation_requests
+        batch_size = batch.batch_size
+        new_batch_size = batch_size
+        
+        if self.enabled and self.config.enable_attention_dp and self.config.mapping.tp_size > 1:
+            all_can_encoder_graph_batch = self.config.dist.tp_allgather(
+                [can_run_encoder_cuda_graph, batch_size])
+            is_all_can_encoder_graph = all(all_can_encoder_graph[0]
+                                  for all_can_encoder_graph in all_can_encoder_graph_batch)
+
+            if is_all_can_encoder_graph:
+                new_batch_size = max(encoder_only_batch[1]
+                                     for encoder_only_batch in all_can_encoder_graph_batch)
+
+            if not is_all_can_encoder_graph:
+                return None, None
+
+        if (not self.enabled
+                or not can_run_encoder_cuda_graph
+                or spec_metadata is not None # encoder cuda graph doesn't support spec decode
+                or new_batch_size > self.max_supported_batch_size):
+            return None, None
+
+        # key: (padded_batch_size, padded_num_tokens, padded_max_seq_len)
+        key, is_padding_performed, is_padding_successful = self.get_graph_key(batch)
+        if (not self.padding_enabled and is_padding_performed) or not is_padding_successful:
+            return None, None
+        
+        if key in self.graphs:
+            # The seq_lens in attn_metadata will still be updated in _prepare_tp_inputs_no_cache
+            return self.graph_metadata[key]["attn_metadata"], key
+        
+        # Graph doesn't exist yet - store metadata for capture
+        graph_attn_metadata = attn_metadata.create_cuda_graph_metadata(
+            key[0], # key[0] is the padded batch size
+            False,
+            0,
+            self.cuda_graph_meta_buffers,
+            for_encoder_only=True,
+        )
+        assert graph_attn_metadata.is_cuda_graph
+
+        # Set the max context q len override to the padded max sequence length
+        graph_attn_metadata.max_context_q_len_override = key[2]
+
+        # Skip qkv slicing in the attention layer
+        graph_attn_metadata.skip_qkv_slicing = True
+
+        return graph_attn_metadata, key
+    
+    def needs_capture(self, key: Tuple[int, int, int]) -> bool:
+        """Check if graph needs to be captured for this key."""
+        return key not in self.graphs
+    
+    def capture(
+        self,
+        key: Tuple[int, int, int],
+        forward_fn: Callable,
+        inputs: Dict[str, Any],
+    ) -> None:
+        """Capture a CUDA graph for the given encoder key.
+
+        Args:
+            key: (padded_batch_size, padded_num_tokens, padded_max_seq_len)
+            forward_fn: Callable that runs the model forward pass.
+            inputs: The inputs dict produced by _prepare_tp_inputs_no_cache.
+
+        All graphs share a single memory pool (set via
+        self.memory_pool = graph.pool() after each capture) so the CUDA
+        driver can reuse memory across independent graph replays.
+        """
+        _, padded_num_tokens, _ = key
+
+        sliced_static_tensors = {
+            "input_ids": self.shared_static_tensors["input_ids"][:padded_num_tokens],
+            "position_ids": self.shared_static_tensors["position_ids"][:, :padded_num_tokens],
+        }
+
+        capture_inputs = inputs.copy()
+        capture_inputs.update(sliced_static_tensors)
+
+        if "token_type_ids" in self.shared_static_tensors and "token_type_ids" in inputs:
+            sliced_static_tensors["token_type_ids"] = self.shared_static_tensors["token_type_ids"][:padded_num_tokens]
+            capture_inputs["token_type_ids"] = sliced_static_tensors["token_type_ids"]
+
+        self.graph_metadata[key] = {
+            "attn_metadata": inputs["attn_metadata"],
+        }
+
+        # Warmup runs required by CUDA graph semantics:
+        # https://pytorch.org/docs/stable/notes/cuda.html#cuda-graph-semantics
+        graph = torch.cuda.CUDAGraph()
+        with with_multi_stream(True), piecewise_cuda_graph(False):
+            for _ in range(self.WARMUP_STEPS):
+                forward_fn(capture_inputs)
+
+            with torch.cuda.graph(graph, pool=self.memory_pool):
+                output = forward_fn(capture_inputs)
+
+        self.graphs[key] = graph
+        self.graph_outputs[key] = make_weak_ref(output)
+        self.memory_pool = graph.pool()
+    
+    def replay(
+        self,
+        key: Tuple[int, int, int],
+        inputs: Dict[str, Any],
+    ) -> Any:
+        """
+        Replay a previously captured CUDA graph.
+        
+        Copies current input data into the static tensors used during capture,
+        then replays the graph.
+        """
+        stored_meta = self.graph_metadata[key]
+        assert inputs["attn_metadata"] is stored_meta["attn_metadata"]
+
+        _, padded_num_tokens, _ = key
+        static_tensors = self.shared_static_tensors
+
+        input_ids = inputs["input_ids"]
+        actual_tokens = input_ids.shape[0]
+
+        static_tensors["input_ids"][:actual_tokens].copy_(input_ids)
+        static_tensors["input_ids"][actual_tokens:padded_num_tokens].fill_(0)
+
+        position_ids = inputs["position_ids"]
+        static_tensors["position_ids"][:, :actual_tokens].copy_(position_ids)
+        static_tensors["position_ids"][:, actual_tokens:padded_num_tokens].fill_(0)
+
+        if ("token_type_ids" in inputs and "token_type_ids" in static_tensors):
+            static_tensors["token_type_ids"][:actual_tokens].copy_(inputs["token_type_ids"])
+            static_tensors["token_type_ids"][actual_tokens:padded_num_tokens].fill_(0)
+
+        self.graphs[key].replay()
+
+        return self.graph_outputs[key]
+    
+    def get_graph_pool(self):
+        """Returns the CUDA memory pool used by this graph runner."""
+        return self.memory_pool
+    
+    def _get_padded_batch(self, batch: ScheduledRequests) -> int:
+        """Pad context_requests with 1-token dummy requests to reach padded_batch_size."""
+        can_run_encoder_cuda_graph = not batch.generation_requests
+        batch_size = batch.batch_size
+        new_batch_size = batch_size
+
+        if self.enabled and self.config.enable_attention_dp and self.config.mapping.tp_size > 1:
+            graph_batch_size = self.config.dist.tp_allgather(
+                [can_run_encoder_cuda_graph, batch_size])
+            all_can_graph = all(gb[0] for gb in graph_batch_size)
+            if all_can_graph:
+                new_batch_size = max(gb[1] for gb in graph_batch_size)
+
+        if (not self.enabled or not self.padding_enabled
+                or not can_run_encoder_cuda_graph
+                or new_batch_size > self.max_supported_batch_size):
+            return 0
+
+        padded_batch_size = self._round_up(new_batch_size,
+                                           self.supported_batch_sizes)
+        if batch_size == padded_batch_size or padded_batch_size == 0:
+            return 0
+
+        padding_size = padded_batch_size - batch_size
+
+        if self.padding_dummy_request is None:
+            self.padding_dummy_request = LlmRequest(
+                request_id=CUDA_GRAPH_DUMMY_REQUEST_ID,
+                max_new_tokens=1,
+                input_tokens=[0],
+                sampling_config=SamplingConfig(
+                    SamplingParams()._get_sampling_config()),
+                is_streaming=False,
+                seq_slot=0,
+            )
+            self.padding_dummy_request.is_dummy_request = True
+            self.padding_dummy_request.is_cuda_graph_dummy = True
+
+        batch.context_requests.extend([self.padding_dummy_request] *
+                                      padding_size)
+        return padding_size
+
+    @contextlib.contextmanager
+    def pad_batch(self, scheduled_requests: ScheduledRequests):
+        """Context manager to pad context_requests with 1-token dummy requests."""
+        padding_size = self._get_padded_batch(scheduled_requests)
+        try:
+            yield scheduled_requests
+        finally:
+            if padding_size > 0:
+                scheduled_requests.context_requests = (scheduled_requests.context_requests[:-padding_size])
+    
+    def clear(self) -> None:
+        """Release all captured graphs and associated resources."""
+        for graph in self.graphs.values():
+            graph.reset()
+        self.graphs.clear()
+        self.graph_outputs.clear()
+        self.graph_metadata.clear()
+        del self.memory_pool
+        self.memory_pool = None
+        torch.cuda.empty_cache()
 
 
 class CUDAGraphRunner:

@@ -73,6 +73,7 @@ public:
         int32_t const token_offset, int32_t const num_tokens, int32_t const predicted_tokens_per_seq,
         torch::Tensor workspace, torch::Tensor output, torch::optional<torch::Tensor> output_sf, torch::Tensor qkv_or_q,
         torch::optional<torch::Tensor> k, torch::optional<torch::Tensor> v, torch::Tensor sequence_length,
+        std::optional<int64_t> max_context_q_len_override,
         torch::Tensor host_past_key_value_lengths, int32_t const total_kv_len, torch::Tensor context_lengths,
         torch::Tensor host_context_lengths, torch::optional<torch::Tensor> kv_cache_block_offsets,
         torch::optional<torch::Tensor> host_kv_cache_block_offsets,
@@ -134,6 +135,7 @@ public:
         int32_t const token_offset, int32_t const num_tokens, int32_t const predicted_tokens_per_seq,
         torch::Tensor workspace, torch::Tensor output, torch::optional<torch::Tensor> output_sf, torch::Tensor qkv_or_q,
         torch::optional<torch::Tensor> k, torch::optional<torch::Tensor> v, torch::Tensor sequence_length,
+        std::optional<int64_t> max_context_q_len_override,
         torch::Tensor host_past_key_value_lengths, int32_t const total_kv_len, torch::Tensor context_lengths,
         torch::Tensor host_context_lengths, torch::optional<torch::Tensor> kv_cache_block_offsets,
         torch::optional<torch::Tensor> host_kv_cache_block_offsets,
@@ -282,8 +284,12 @@ public:
         int const* context_lengths_ptr = context_lengths.slice(0, seq_offset).data_ptr<int>();
         int const* sequence_lengths_ptr = sequence_length.slice(0, seq_offset).data_ptr<int>();
         // Note we still need context length during generation for MMHA optimization.
-        int32_t const max_context_q_len
+        // For encoder-only model's cuda graph compatibility
+        int32_t const max_context_q_len_computed
             = host_context_lengths.slice(0, seq_offset, seq_offset + num_seqs).max().item<int32_t>();
+        int32_t const max_context_q_len = max_context_q_len_override.has_value()
+            ? static_cast<int32_t>(max_context_q_len_override.value())
+            : max_context_q_len_computed;
         int32_t const max_past_kv_length
             = host_past_key_value_lengths.slice(0, seq_offset, seq_offset + num_seqs).max().item<int32_t>();
 
@@ -605,7 +611,7 @@ using torch_ext::trtllm::attention::AttentionInputType;
 void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<torch::Tensor> v, torch::Tensor& output,
     std::optional<torch::Tensor> output_sf, std::optional<torch::Tensor> workspace_, torch::Tensor sequence_length,
     torch::Tensor host_past_key_value_lengths, torch::Tensor host_total_kv_lens, torch::Tensor context_lengths,
-    torch::Tensor host_context_lengths, torch::Tensor host_request_types,
+    torch::Tensor host_context_lengths, torch::Tensor host_request_types, std::optional<int64_t> max_context_q_len_override,
     std::optional<torch::Tensor> kv_cache_block_offsets, std::optional<torch::Tensor> host_kv_cache_block_offsets,
     std::optional<torch::Tensor> host_kv_cache_pool_pointers, std::optional<torch::Tensor> host_kv_cache_pool_mapping,
     std::optional<torch::Tensor> cache_indirection, std::optional<torch::Tensor> kv_scale_orig_quant,
@@ -893,7 +899,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
             /*is_context=*/true, seq_offset,
             /*num_seqs=*/num_contexts, token_offset,
             /*num_tokens=*/num_ctx_tokens, predicted_tokens_per_seq, workspace, output, output_sf, qkv_or_q, k, v,
-            sequence_length, host_past_key_value_lengths, ctx_total_kv_len, context_lengths, host_context_lengths,
+            sequence_length, max_context_q_len_override, host_past_key_value_lengths, ctx_total_kv_len, context_lengths, host_context_lengths,
             kv_cache_block_offsets, host_kv_cache_block_offsets, host_kv_cache_pool_pointers,
             host_kv_cache_pool_mapping, cache_indirection, kv_scale_orig_quant, kv_scale_quant_orig, out_scale,
             rotary_inv_freq, rotary_cos_sin, latent_cache, q_pe, block_ids_per_seq, mrope_rotary_cos_sin,
@@ -912,7 +918,7 @@ void attention(torch::Tensor q, std::optional<torch::Tensor> k, std::optional<to
             /*is_context=*/false, seq_offset,
             /*num_seqs=*/num_generations, token_offset,
             /*num_tokens=*/num_gen_tokens, predicted_tokens_per_seq, workspace, output, output_sf, qkv_or_q, k, v,
-            sequence_length, host_past_key_value_lengths, gen_total_kv_len, context_lengths, host_context_lengths,
+            sequence_length, max_context_q_len_override, host_past_key_value_lengths, gen_total_kv_len, context_lengths, host_context_lengths,
             kv_cache_block_offsets, host_kv_cache_block_offsets, host_kv_cache_pool_pointers,
             host_kv_cache_pool_mapping, cache_indirection, kv_scale_orig_quant, kv_scale_quant_orig, out_scale,
             rotary_inv_freq, rotary_cos_sin, latent_cache, q_pe, block_ids_per_seq, mrope_rotary_cos_sin,

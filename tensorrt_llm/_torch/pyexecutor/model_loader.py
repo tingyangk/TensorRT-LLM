@@ -295,6 +295,7 @@ class ModelLoader:
                 self.weight_mapper = checkpoint_loader.get_initialized_weight_mapper(
                     model, config)
                 initialize_dummy_weights(model)
+                model.half() # TYK: Hack to make FMHA work with dummy weights
                 if self.spec_config is not None and self.spec_config.spec_dec_mode.need_load_draft_weights(
                 ):
                     model.draft_model.load_weights_from_target_model(model)

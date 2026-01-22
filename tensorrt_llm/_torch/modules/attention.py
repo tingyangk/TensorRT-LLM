@@ -448,11 +448,14 @@ class Attention(nn.Module):
     ):
         num_tokens = attn_metadata.num_tokens
 
-        q = q[:num_tokens, :]
-        if k is not None:
-            k = k[:num_tokens, :]
-        if v is not None:
-            v = v[:num_tokens, :]
+        # When encoder CUDA graph is enabled, skip qkv slicing in the attention layers since they are capturable.
+        # Needs to keep the qkv shapes as padded num tokens in other layers.
+        if not attn_metadata.skip_qkv_slicing:
+            q = q[:num_tokens, :]
+            if k is not None:
+                k = k[:num_tokens, :]
+            if v is not None:
+                v = v[:num_tokens, :]
 
         out_scale = None
         out_scale_sf = None
