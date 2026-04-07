@@ -3710,6 +3710,16 @@ class TorchLlmArgs(BaseLlmArgs):
         status="prototype",
     )
 
+    encoder_only: Optional[bool] = Field(
+        default=None,
+        description=
+        "Set to True for encoder-only models (BERT, RoBERTa, reward models, "
+        "etc.) to enable the optimized batch-forward encode() path that "
+        "bypasses the decoder scheduler and autoregressive loop. When None, "
+        "proceed with the old generate() path.",
+        status="prototype",
+    )
+
     ray_worker_extension_cls: Optional[str] = Field(
         default=None,
         description="The full worker extension class name including module path. "
