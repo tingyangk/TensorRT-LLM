@@ -107,8 +107,7 @@ def test_encode_mixed_batch(bert_encode_llm):
 
 def test_encode_matches_huggingface(bert_encode_llm):
     """encode() logits match HuggingFace BertForSequenceClassification."""
-    from transformers import (AutoModelForSequenceClassification,
-                              AutoTokenizer)
+    from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
     model_dir = get_model_path(BERT_MODEL_PATH)
 
@@ -119,16 +118,14 @@ def test_encode_matches_huggingface(bert_encode_llm):
     # Get HuggingFace results
     tokenizer = AutoTokenizer.from_pretrained(model_dir)
     hf_model = AutoModelForSequenceClassification.from_pretrained(model_dir)
-    hf_model = hf_model.half().to(tllm_logits.device)
+    hf_model = hf_model.half().cuda()
 
     with torch.inference_mode():
-        inputs = tokenizer(PROMPTS, return_tensors="pt",
-                           padding="longest").to(hf_model.device)
+        inputs = tokenizer(PROMPTS, return_tensors="pt", padding="longest").to(hf_model.device)
         hf_outputs = hf_model(**inputs)
-        hf_logits = hf_outputs.logits.float()
+        hf_logits = hf_outputs.logits.float().cpu()
 
-    torch.testing.assert_close(tllm_logits, hf_logits, rtol=1.5e-2,
-                               atol=1.5e-2)
+    torch.testing.assert_close(tllm_logits, hf_logits, rtol=1.5e-2, atol=1.5e-2)
 
 
 # --------------------------------------------------------------------------- #
@@ -151,8 +148,7 @@ def test_generate_async_raises_on_encoder_only(bert_encode_llm):
 def test_encode_raises_without_encoder_only():
     """encode() raises RuntimeError on a decoder model (encoder_only=False)."""
     model_dir = get_model_path(BERT_MODEL_PATH)
-    with LLM(model=model_dir, encoder_only=False,
-             disable_overlap_scheduler=True) as llm:
+    with LLM(model=model_dir, encoder_only=False, disable_overlap_scheduler=True) as llm:
         with pytest.raises(RuntimeError, match="encoder_only=True"):
             llm.encode("Hello")
 

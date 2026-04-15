@@ -3711,12 +3711,14 @@ class TorchLlmArgs(BaseLlmArgs):
     )
 
     encoder_only: Optional[bool] = Field(
-        default=None,
+        default=False,
         description=
-        "Set to True for encoder-only models (BERT, RoBERTa, reward models, "
-        "etc.) to enable the optimized batch-forward encode() path that "
-        "bypasses the decoder scheduler and autoregressive loop. When None, "
-        "proceed with the old generate() path.",
+        "Set to True to use the batch-forward encode() path, which runs a "
+        "single forward pass and returns the model output directly, bypassing "
+        "the scheduler and autoregressive loop. Works for encoder-only "
+        "models (BERT, RoBERTa, reward models) and decoder models used in "
+        "single-prefill mode (e.g., extracting embeddings). When False "
+        "(default), uses the standard generate() path.",
         status="prototype",
     )
 

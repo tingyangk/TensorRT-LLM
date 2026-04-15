@@ -3705,8 +3705,7 @@ class PyTorchModelEngine(ModelEngine):
             num_accepted_tokens_device, req_id_to_old_request, resource_manager,
             maybe_graph)
 
-    def _prepare_encoder_inputs(self,
-                               inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _prepare_encoder_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """Prepare model-ready inputs dict for encoder-only models.
 
         Encoder equivalent of _prepare_tp_inputs + _preprocess_inputs.
@@ -3749,15 +3748,13 @@ class PyTorchModelEngine(ModelEngine):
 
         # 3. Build model-ready dict.
         #    **inputs goes FIRST so that the explicit buffer keys override the
-        #    raw tensors. Extra keys (seq_lens, token_type_ids, etc.) pass
-        #    through to the model's **kwargs and are silently ignored if not
-        #    in the model's forward() signature.
+        #    raw tensors. Extra keys pass through to the model's **kwargs
+        #    are silently ignored if not in the model's forward() signature.
         model_inputs = {
             **inputs,
             'attn_metadata': attn_metadata,
             'input_ids': self.input_ids_cuda[:num_tokens],
             'position_ids': self.position_ids_cuda[:num_tokens].unsqueeze(0),
-            'inputs_embeds': None,
         }
 
         return model_inputs
@@ -3765,8 +3762,7 @@ class PyTorchModelEngine(ModelEngine):
     @torch.inference_mode()
     @with_model_extra_attrs(lambda self: self.model.extra_attrs)
     @nvtx_range("encoder_forward")
-    def encoder_forward(self,
-                        inputs: Dict[str, Any]) -> Dict[str, Any]:
+    def encoder_forward(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
         """Direct tensor-level forward for encoder-only models.
 
         Bypasses ScheduledRequests/LlmRequest entirely. Takes a raw inputs
@@ -3781,7 +3777,9 @@ class PyTorchModelEngine(ModelEngine):
             Dict with 'logits' tensor and any other model outputs.
         """
         model_inputs = self._prepare_encoder_inputs(inputs)
-        return self._forward_step(model_inputs, None, False)
+        return self._forward_step(model_inputs,
+                                  gather_ids=None,
+                                  gather_context_logits=False)
 
     @torch.inference_mode()
     @with_model_extra_attrs(lambda self: self.model.extra_attrs)
@@ -3868,8 +3866,10 @@ class PyTorchModelEngine(ModelEngine):
                     return self._forward_step_mm_encoder_only(
                         inputs, scheduled_requests)
                 else:
-                    return self._forward_step(inputs, gather_ids,
-                                              gather_context_logits)
+                    return self._forward_step(
+                        inputs,
+                        gather_ids=gather_ids,
+                        gather_context_logits=gather_context_logits)
         with self.cuda_graph_runner.pad_batch(
                 scheduled_requests, resource_manager,
                 self.runtime_draft_len) as padded_requests:
@@ -3924,8 +3924,10 @@ class PyTorchModelEngine(ModelEngine):
                 if not can_run_graph:
                     # Fallback to eager execution if graph was not used
                     with MoeLoadBalancerIterContext(moe_load_balancer):
-                        outputs = self._forward_step(inputs, gather_ids,
-                                                     gather_context_logits)
+                        outputs = self._forward_step(
+                            inputs,
+                            gather_ids=gather_ids,
+                            gather_context_logits=gather_context_logits)
                 else:
                     if self.cuda_graph_runner.needs_capture(key):
 
@@ -3997,6 +3999,7 @@ class PyTorchModelEngine(ModelEngine):
     @nvtx_range("_forward_step")
     def _forward_step(self,
                       inputs: Dict[str, Any],
+                      *,
                       gather_ids: Optional[torch.Tensor],
                       gather_context_logits: bool = False) -> Dict[str, Any]:
         inputs = self._preprocess_inputs(inputs)

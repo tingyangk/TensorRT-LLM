@@ -769,6 +769,10 @@ class BaseLLM:
             raise RuntimeError(
                 "encode() requires encoder_only=True. "
                 "Set encoder_only=True in the LLM() constructor.")
+        if self._encoder_executor is None:
+            raise RuntimeError(
+                "LLM is shut down or not initialized. Please recreate the LLM object."
+            )
 
         unbatched = not isinstance(inputs, list)
         if not unbatched:
@@ -790,8 +794,7 @@ class BaseLLM:
         # Tokenize each input (reuses existing input_processor)
         token_ids_list = []
         prompts = []
-        sampling_params = SamplingParams(
-            add_special_tokens=add_special_tokens)
+        sampling_params = SamplingParams(add_special_tokens=add_special_tokens)
 
         total_tokens = 0
         max_seq_len_batch = 0
@@ -830,15 +833,16 @@ class BaseLLM:
         seq_lens = torch.tensor([len(t) for t in token_ids_list],
                                 dtype=torch.int32)
         flat_token_ids = torch.tensor(
-            [tid for tids in token_ids_list for tid in tids],
-            dtype=torch.int32)
+            [tid for tids in token_ids_list for tid in tids], dtype=torch.int32)
 
         # Build inputs dict — common + model-specific kwargs.
         # Filter keys that are set internally by _prepare_encoder_inputs or
         # _forward_step to avoid "multiple values for keyword argument" errors.
         _RESERVED_KEYS = {
-            'input_ids', 'position_ids', 'seq_lens', 'attn_metadata',
-            'inputs_embeds', 'return_context_logits',
+            'input_ids',
+            'seq_lens',
+            'attn_metadata',
+            'return_context_logits',
         }
         filtered_kwargs = {
             k: v
@@ -926,9 +930,8 @@ class BaseLLM:
             List[dict]: A list of runtime events as dict.
         '''
         if self._encoder_only:
-            raise RuntimeError(
-                "get_kv_cache_events() is not available when "
-                "encoder_only=True.")
+            raise RuntimeError("get_kv_cache_events() is not available when "
+                               "encoder_only=True.")
         return self._executor.get_kv_events(timeout=timeout)
 
     @set_api_status("beta")
@@ -1153,7 +1156,8 @@ class BaseLLM:
             self._executor.shutdown()
             self._executor = None
 
-        if hasattr(self, "_encoder_executor") and self._encoder_executor is not None:
+        if hasattr(self,
+                   "_encoder_executor") and self._encoder_executor is not None:
             self._encoder_executor.shutdown()
             self._encoder_executor = None
 
@@ -1505,9 +1509,8 @@ class _TorchLLM(BaseLLM):
         # Hint: if this looks like an encoder model, suggest encode()
         if self.args.encoder_only is None and not self.args.mm_encoder_only:
             from tensorrt_llm._torch.model_config import ModelConfig
-            architectures = getattr(
-                self._hf_model_config, 'architectures',
-                None) if self._hf_model_config else None
+            architectures = getattr(self._hf_model_config, 'architectures',
+                                    None) if self._hf_model_config else None
             if architectures and not ModelConfig.is_generation_model(
                     architectures):
                 logger.info(

@@ -38,10 +38,10 @@ class EncoderExecutor:
             "encoder_only mode enabled: using EncoderExecutor. "
             "Scheduler, sampler, KV cache, and generation-related parameters "
             "(disable_overlap_scheduler, max_tokens, temperature, etc.) "
-            "are bypassed. Use llm.encode() for inference.")
+            "are bypassed. Use llm.encode() for inference."
+        )
 
-    def batch_forward(self,
-                      inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
+    def batch_forward(self, inputs: Dict[str, Any]) -> Dict[str, torch.Tensor]:
         """Execute a pre-formed batch in one forward pass.
 
         Args:

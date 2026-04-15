@@ -225,6 +225,17 @@ def get_guided_decoding_config(guided_decoding_backend: str,
     return guided_decoding_config
 
 
+def _load_config_and_create_checkpoint_loader(
+        llm_args: TorchLlmArgs, checkpoint_dir: Optional[str] = None):
+    torch.cuda.set_per_process_memory_fraction(1.0)
+    checkpoint_loader = _construct_checkpoint_loader(llm_args.backend,
+                                                     llm_args.checkpoint_loader,
+                                                     llm_args.checkpoint_format)
+    llm_args = ModelLoader.load_config_and_apply_defaults(
+        checkpoint_dir, llm_args, checkpoint_loader)
+    return llm_args, checkpoint_loader
+
+
 def create_encoder_executor(
     llm_args: TorchLlmArgs,
     checkpoint_dir: Optional[str] = None,
@@ -244,12 +255,8 @@ def create_encoder_executor(
     """
     from .encoder_executor import EncoderExecutor
 
-    torch.cuda.set_per_process_memory_fraction(1.0)
-    checkpoint_loader = _construct_checkpoint_loader(llm_args.backend,
-                                                     llm_args.checkpoint_loader,
-                                                     llm_args.checkpoint_format)
-    llm_args = ModelLoader.load_config_and_apply_defaults(
-        checkpoint_dir, llm_args, checkpoint_loader)
+    llm_args, checkpoint_loader = _load_config_and_create_checkpoint_loader(
+        llm_args, checkpoint_dir)
 
     mapping = _get_mapping(llm_args.parallel_config.to_mapping())
     dist = Distributed.get(mapping)
@@ -294,13 +301,8 @@ def create_py_executor(
     """
 
     skip_est = os.environ.get("TRTLLM_SKIP_KV_CACHE_ESTIMATION", '0') == '1'
-    torch.cuda.set_per_process_memory_fraction(1.0)
-    # Apply model-specific defaults early, before destructuring llm_args fields
-    checkpoint_loader = _construct_checkpoint_loader(llm_args.backend,
-                                                     llm_args.checkpoint_loader,
-                                                     llm_args.checkpoint_format)
-    llm_args = ModelLoader.load_config_and_apply_defaults(
-        checkpoint_dir, llm_args, checkpoint_loader)
+    llm_args, checkpoint_loader = _load_config_and_create_checkpoint_loader(
+        llm_args, checkpoint_dir)
 
     garbage_collection_gen0_threshold = llm_args.garbage_collection_gen0_threshold
     lora_config = llm_args.lora_config
