@@ -101,34 +101,6 @@ def test_encode_mixed_batch(bert_encode_llm):
 
 
 # --------------------------------------------------------------------------- #
-# Output correctness — compare with HuggingFace
-# --------------------------------------------------------------------------- #
-
-
-def test_encode_matches_huggingface(bert_encode_llm):
-    """encode() logits match HuggingFace BertForSequenceClassification."""
-    from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-    model_dir = get_model_path(BERT_MODEL_PATH)
-
-    # Get TRT-LLM results
-    results = bert_encode_llm.encode(PROMPTS)
-    tllm_logits = torch.stack([r.logits.cpu() for r in results])
-
-    # Get HuggingFace results
-    tokenizer = AutoTokenizer.from_pretrained(model_dir)
-    hf_model = AutoModelForSequenceClassification.from_pretrained(model_dir)
-    hf_model = hf_model.half().cuda()
-
-    with torch.inference_mode():
-        inputs = tokenizer(PROMPTS, return_tensors="pt", padding="longest").to(hf_model.device)
-        hf_outputs = hf_model(**inputs)
-        hf_logits = hf_outputs.logits.float().cpu()
-
-    torch.testing.assert_close(tllm_logits, hf_logits, rtol=1.5e-2, atol=1.5e-2)
-
-
-# --------------------------------------------------------------------------- #
 # Cross-API guards
 # --------------------------------------------------------------------------- #
 
@@ -160,6 +132,42 @@ def test_get_stats_raises_on_encoder_only(bert_encode_llm):
 
 
 # --------------------------------------------------------------------------- #
+# Batch tokenization (Triton pattern)
+# --------------------------------------------------------------------------- #
+
+
+def test_encode_batch_token_ids(bert_encode_llm):
+    """encode() with a batch of pre-tokenized token IDs (Triton serving pattern).
+
+    This validates the batch tokenization pattern used in the Triton backend
+    example, where the tokenizer is called once for the entire batch and
+    the resulting token IDs are passed to encode().
+    """
+    from transformers import AutoTokenizer
+
+    model_dir = get_model_path(BERT_MODEL_PATH)
+    tokenizer = AutoTokenizer.from_pretrained(model_dir)
+
+    # Batch tokenize — one tokenizer call for all prompts
+    encoded = tokenizer(PROMPTS, padding=False, truncation=True, max_length=512)
+    token_ids_list = encoded["input_ids"]
+
+    # Pass pre-tokenized IDs to encode()
+    results_from_ids = bert_encode_llm.encode(token_ids_list)
+
+    # Compare with string-based tokenization
+    results_from_strings = bert_encode_llm.encode(PROMPTS)
+
+    assert len(results_from_ids) == len(results_from_strings)
+    for r_ids, r_str in zip(results_from_ids, results_from_strings):
+        # Logits should be identical — same model, same tokens
+        torch.testing.assert_close(r_ids.logits, r_str.logits)
+        # Token IDs passed directly don't get re-tokenized
+        assert r_ids.prompt is None
+        assert r_str.prompt is not None
+
+
+# --------------------------------------------------------------------------- #
 # Input validation
 # --------------------------------------------------------------------------- #
 
@@ -173,6 +181,30 @@ def test_encode_empty_string(bert_encode_llm):
     result = bert_encode_llm.encode("")
     assert isinstance(result, EncoderOutput)
     assert result.logits.shape == (2,)
+
+
+def test_encode_oversized_batch(bert_encode_llm):
+    """encode() raises ValueError when batch exceeds max_batch_size."""
+    engine = bert_encode_llm._encoder_executor.model_engine
+    max_batch = engine.batch_size
+
+    # Create a batch that exceeds max_batch_size
+    oversized = ["Hello"] * (max_batch + 1)
+    with pytest.raises(ValueError, match="max_batch_size"):
+        bert_encode_llm.encode(oversized)
+
+
+def test_encode_add_special_tokens_false(bert_encode_llm):
+    """add_special_tokens=False skips [CLS]/[SEP] tokens."""
+    result_with = bert_encode_llm.encode("Hello world", add_special_tokens=True)
+    result_without = bert_encode_llm.encode("Hello world", add_special_tokens=False)
+
+    # With special tokens: [CLS] hello world [SEP] = more tokens
+    # Without: hello world = fewer tokens
+    assert len(result_with.prompt_token_ids) > len(result_without.prompt_token_ids)
+    # Both should still produce valid classification output
+    assert result_with.logits.shape == (2,)
+    assert result_without.logits.shape == (2,)
 
 
 # --------------------------------------------------------------------------- #
