@@ -4000,7 +4000,7 @@ class PyTorchModelEngine(ModelEngine):
     def _forward_step(self,
                       inputs: Dict[str, Any],
                       *,
-                      gather_ids: Optional[torch.Tensor],
+                      gather_ids: Optional[torch.Tensor] = None,
                       gather_context_logits: bool = False) -> Dict[str, Any]:
         inputs = self._preprocess_inputs(inputs)
         if inputs.get('spec_metadata', None):
