@@ -35,9 +35,9 @@ PROMPTS = [
 
 @pytest.fixture(scope="module")
 def bert_encode_llm():
-    """Create an LLM with encoder_only=True for BERT, shared across tests."""
+    """Create an LLM with encode_only=True for BERT, shared across tests."""
     model_dir = get_model_path(BERT_MODEL_PATH)
-    llm = LLM(model=model_dir, encoder_only=True)
+    llm = LLM(model=model_dir, encode_only=True)
     yield llm
     llm.shutdown()
 
@@ -134,28 +134,28 @@ def test_encode_matches_huggingface(bert_encode_llm):
 
 
 def test_generate_raises_on_encoder_only(bert_encode_llm):
-    """generate() raises RuntimeError when encoder_only=True."""
-    with pytest.raises(RuntimeError, match="encoder_only=True"):
+    """generate() raises RuntimeError when encode_only=True."""
+    with pytest.raises(RuntimeError, match="encode_only=True"):
         bert_encode_llm.generate(PROMPTS)
 
 
 def test_generate_async_raises_on_encoder_only(bert_encode_llm):
-    """generate_async() raises RuntimeError when encoder_only=True."""
-    with pytest.raises(RuntimeError, match="encoder_only=True"):
+    """generate_async() raises RuntimeError when encode_only=True."""
+    with pytest.raises(RuntimeError, match="encode_only=True"):
         bert_encode_llm.generate_async("Hello")
 
 
 def test_encode_raises_without_encoder_only():
-    """encode() raises RuntimeError on a decoder model (encoder_only=False)."""
+    """encode() raises RuntimeError on a decoder model (encode_only=False)."""
     model_dir = get_model_path(BERT_MODEL_PATH)
-    with LLM(model=model_dir, encoder_only=False, disable_overlap_scheduler=True) as llm:
-        with pytest.raises(RuntimeError, match="encoder_only=True"):
+    with LLM(model=model_dir, encode_only=False, disable_overlap_scheduler=True) as llm:
+        with pytest.raises(RuntimeError, match="encode_only=True"):
             llm.encode("Hello")
 
 
 def test_get_stats_raises_on_encoder_only(bert_encode_llm):
-    """get_stats() raises RuntimeError when encoder_only=True."""
-    with pytest.raises(RuntimeError, match="encoder_only=True"):
+    """get_stats() raises RuntimeError when encode_only=True."""
+    with pytest.raises(RuntimeError, match="encode_only=True"):
         bert_encode_llm.get_stats()
 
 

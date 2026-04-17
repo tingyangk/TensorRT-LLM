@@ -240,7 +240,7 @@ def create_encoder_executor(
     llm_args: TorchLlmArgs,
     checkpoint_dir: Optional[str] = None,
 ):
-    """Create an EncoderExecutor for encoder-only models.
+    """Create an EncoderExecutor for models using the encode-only path.
 
     Handles model loading and model_engine creation, then wraps in a
     lightweight EncoderExecutor. Skips all decoder infrastructure

@@ -3706,7 +3706,7 @@ class PyTorchModelEngine(ModelEngine):
             maybe_graph)
 
     def _prepare_encoder_inputs(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Prepare model-ready inputs dict for encoder-only models.
+        """Prepare model-ready inputs dict for encode-only path.
 
         Encoder equivalent of _prepare_tp_inputs + _preprocess_inputs.
         Consumes raw inputs dict, copies to pre-allocated CUDA buffers,
@@ -3763,7 +3763,7 @@ class PyTorchModelEngine(ModelEngine):
     @with_model_extra_attrs(lambda self: self.model.extra_attrs)
     @nvtx_range("encoder_forward")
     def encoder_forward(self, inputs: Dict[str, Any]) -> Dict[str, Any]:
-        """Direct tensor-level forward for encoder-only models.
+        """Direct tensor-level forward for encode-only path.
 
         Bypasses ScheduledRequests/LlmRequest entirely. Takes a raw inputs
         dict, prepares model-ready inputs via _prepare_encoder_inputs, and

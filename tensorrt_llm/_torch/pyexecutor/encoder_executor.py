@@ -20,7 +20,7 @@ from tensorrt_llm.logger import logger
 
 
 class EncoderExecutor:
-    """Executor for encoder-only models.
+    """Executor for models using the encode-only path.
 
     Primary path: batch_forward(inputs) — synchronous batch execution.
     Delegates to model_engine.encoder_forward() for all heavy lifting
@@ -35,7 +35,7 @@ class EncoderExecutor:
         self.dist = dist
 
         logger.info(
-            "encoder_only mode enabled: using EncoderExecutor. "
+            "encode_only path enabled: using EncoderExecutor. "
             "Scheduler, sampler, KV cache, and generation-related parameters "
             "(disable_overlap_scheduler, max_tokens, temperature, etc.) "
             "are bypassed. Use llm.encode() for inference."

@@ -3710,7 +3710,7 @@ class TorchLlmArgs(BaseLlmArgs):
         status="prototype",
     )
 
-    encoder_only: Optional[bool] = Field(
+    encode_only: Optional[bool] = Field(
         default=False,
         description=
         "Set to True to use the batch-forward encode() path, which runs a "

@@ -256,7 +256,7 @@ class BaseLLM:
             # Due to the Executor can only accept a engine path, we need to save the engine to a directory
             self._engine_dir: Optional[Path] = None
             self._executor: Optional[GenerationExecutor] = None
-            self._encoder_only: bool = False
+            self._encode_only: bool = False
             self._encoder_executor = None
             if self._on_trt_backend:
                 self._workspace = tempfile.TemporaryDirectory(
@@ -464,9 +464,9 @@ class BaseLLM:
             tensorrt_llm.llmapi.RequestOutput: The output data of the completion request to the LLM.
         """
 
-        if self._encoder_only:
+        if self._encode_only:
             raise RuntimeError(
-                "generate_async() is not available when encoder_only=True. "
+                "generate_async() is not available when encode_only=True. "
                 "Use llm.encode() for encoder-only models.")
 
         # Check if the worker is shutting down
@@ -749,7 +749,7 @@ class BaseLLM:
     ) -> Union[EncoderOutput, List[EncoderOutput]]:
         """Encode inputs using an encoder-only model (PyTorch backend only).
 
-        Only available when encoder_only=True is set in the LLM constructor.
+        Only available when encode_only=True is set in the LLM constructor.
 
         Args:
             inputs: Text string(s), token ID list(s), or TextPrompt/TokensPrompt dict(s).
@@ -763,12 +763,11 @@ class BaseLLM:
             EncoderOutput or List[EncoderOutput] with logits/embeddings.
 
         Raises:
-            RuntimeError: If encoder_only mode is not enabled.
+            RuntimeError: If encode_only mode is not enabled.
         """
-        if not self._encoder_only:
-            raise RuntimeError(
-                "encode() requires encoder_only=True. "
-                "Set encoder_only=True in the LLM() constructor.")
+        if not self._encode_only:
+            raise RuntimeError("encode() requires encode_only=True. "
+                               "Set encode_only=True in the LLM() constructor.")
         if self._encoder_executor is None:
             raise RuntimeError(
                 "LLM is shut down or not initialized. Please recreate the LLM object."
@@ -861,7 +860,7 @@ class BaseLLM:
         # NOTE: logits[i] assumes batch-indexed output (e.g., BERT classification
         # returns [batch_size, num_classes]). Per-token models that return packed
         # [total_tokens, hidden_size] would need cumulative-sum slicing instead.
-        logits = outputs['logits']
+        logits = outputs['logits'].cpu()
         results = []
         for i in range(len(token_ids_list)):
             results.append(
@@ -885,9 +884,9 @@ class BaseLLM:
             List[dict]: A list of runtime stats as dicts.
                 e.g., [{"cpuMemUsage": ..., "iter": 0, ...}, {"cpuMemUsage": ..., "iter": 1, ...}]
         '''
-        if self._encoder_only:
+        if self._encode_only:
             raise RuntimeError(
-                "get_stats() is not available when encoder_only=True. "
+                "get_stats() is not available when encode_only=True. "
                 "Use llm.encode() for encoder-only models.")
         return self._executor.get_stats(timeout=timeout)
 
@@ -903,9 +902,9 @@ class BaseLLM:
         Returns:
             tensorrt_llm.executor.result.IterationResult: An async iterable object containing runtime stats.
         '''
-        if self._encoder_only:
+        if self._encode_only:
             raise RuntimeError(
-                "get_stats_async() is not available when encoder_only=True. "
+                "get_stats_async() is not available when encode_only=True. "
                 "Use llm.encode() for encoder-only models.")
         return self._executor.aget_stats(timeout=timeout)
 
@@ -929,9 +928,9 @@ class BaseLLM:
         Returns:
             List[dict]: A list of runtime events as dict.
         '''
-        if self._encoder_only:
+        if self._encode_only:
             raise RuntimeError("get_kv_cache_events() is not available when "
-                               "encoder_only=True.")
+                               "encode_only=True.")
         return self._executor.get_kv_events(timeout=timeout)
 
     @set_api_status("beta")
@@ -956,10 +955,10 @@ class BaseLLM:
         Returns:
             tensorrt_llm.executor.result.IterationResult: An async iterable object containing runtime events.
         '''
-        if self._encoder_only:
+        if self._encode_only:
             raise RuntimeError(
                 "get_kv_cache_events_async() is not available when "
-                "encoder_only=True.")
+                "encode_only=True.")
         return self._executor.aget_kv_events(timeout=timeout)
 
     def _process_env_overrides(self,
@@ -1171,7 +1170,7 @@ class BaseLLM:
         Returns:
             bool: True if the executor is running and not shutdown, False otherwise.
         """
-        if self._encoder_only:
+        if self._encode_only:
             return (hasattr(self, "_encoder_executor")
                     and self._encoder_executor is not None)
         if hasattr(self, "_executor") and self._executor is not None:
@@ -1453,9 +1452,9 @@ class _TorchLLM(BaseLLM):
         Returns:
             list[Any]: A list of results from each worker.
         """
-        if self._encoder_only:
+        if self._encode_only:
             raise RuntimeError(
-                "_collective_rpc() is not available when encoder_only=True.")
+                "_collective_rpc() is not available when encode_only=True.")
         if hasattr(self._executor, 'collective_rpc'):
             return self._executor.collective_rpc(method, args, kwargs,
                                                  non_block, unique_reply_rank,
@@ -1489,10 +1488,10 @@ class _TorchLLM(BaseLLM):
                                                       **input_processor_kwargs)
         self._tokenizer = self.input_processor.tokenizer
 
-        # Resolve encoder_only mode (opt-in only)
-        self._encoder_only = (self.args.encoder_only is True)
+        # Resolve encode_only mode (opt-in only)
+        self._encode_only = (self.args.encode_only is True)
 
-        if self._encoder_only:
+        if self._encode_only:
             # Create ONLY the EncoderExecutor — skip decoder infrastructure.
             from tensorrt_llm._torch.pyexecutor.py_executor_creator import \
                 create_encoder_executor
@@ -1502,12 +1501,12 @@ class _TorchLLM(BaseLLM):
                 if self._hf_model_dir else None,
             )
             logger.info(
-                "encoder_only=True: using EncoderExecutor. Only llm.encode() "
+                "encode_only=True: using EncoderExecutor. Only llm.encode() "
                 "is available. generate()/generate_async() are not supported.")
             return  # Skip _executor creation
 
         # Hint: if this looks like an encoder model, suggest encode()
-        if self.args.encoder_only is None and not self.args.mm_encoder_only:
+        if self.args.encode_only is None and not self.args.mm_encoder_only:
             from tensorrt_llm._torch.model_config import ModelConfig
             architectures = getattr(self._hf_model_config, 'architectures',
                                     None) if self._hf_model_config else None
@@ -1515,7 +1514,7 @@ class _TorchLLM(BaseLLM):
                     architectures):
                 logger.info(
                     "Detected encoder-only model architecture (%s). Consider "
-                    "using LLM(model=..., encoder_only=True) with "
+                    "using LLM(model=..., encode_only=True) with "
                     "llm.encode() for optimized batch-forward inference that "
                     "bypasses the decoder scheduler.", architectures[0])
 
