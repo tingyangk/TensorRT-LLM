@@ -107,12 +107,12 @@ class EncoderOutput:
     """Output from an encoder-only model.
 
     Attributes:
-        logits: Model output tensor. Shape depends on model:
+        logits (torch.Tensor): Model output tensor. Shape depends on model:
             - Classification: [num_classes]
             - Per-token scoring: [seq_len, num_labels]
             - Embeddings: [hidden_size]
-        prompt_token_ids: The tokenized input IDs.
-        prompt: The original text prompt, if provided as string.
+        prompt_token_ids (List[int]): The tokenized input IDs.
+        prompt (Optional[str]): The original text prompt, if provided as string.
     """
     logits: torch.Tensor
     prompt_token_ids: List[int]
@@ -367,6 +367,7 @@ class BaseLLM:
                 Scheduling parameters. Defaults to None.
             cache_salt (str, Sequence[str], optional): If specified, KV cache will be salted with the provided string to limit the kv cache reuse to the requests with the same string. Defaults to None.
             priority (float, List[float]): The scheduling priority for the request(s), in the range [0, 1]. Higher values indicate higher priority. Defaults to 0.5.
+
         Returns:
             Union[tensorrt_llm.llmapi.RequestOutput, List[tensorrt_llm.llmapi.RequestOutput]]: The output data of the completion request to the LLM.
         """
@@ -460,6 +461,7 @@ class BaseLLM:
             scheduling_params (tensorrt_llm.scheduling_params.SchedulingParams, optional): Scheduling parameters. Defaults to None.
             cache_salt (str, optional): If specified, KV cache will be salted with the provided string to limit the kv cache reuse to the requests with the same string. Defaults to None.
             priority (float): The scheduling priority for the request, in the range [0, 1]. Higher values indicate higher priority. Defaults to 0.5.
+
         Returns:
             tensorrt_llm.llmapi.RequestOutput: The output data of the completion request to the LLM.
         """
@@ -745,22 +747,21 @@ class BaseLLM:
         self,
         inputs: Union[PromptInputs, Sequence[PromptInputs]],
         add_special_tokens: bool = True,
-        **model_kwargs,
+        **model_kwargs: Any,
     ) -> Union[EncoderOutput, List[EncoderOutput]]:
         """Encode inputs using an encoder-only model (PyTorch backend only).
 
         Only available when encode_only=True is set in the LLM constructor.
 
         Args:
-            inputs: Text string(s), token ID list(s), or TextPrompt/TokensPrompt dict(s).
-            add_special_tokens: Whether to add special tokens (e.g., [CLS]/[SEP])
-                during tokenization. Defaults to True.
-            **model_kwargs: Model-specific inputs passed through to the model's
-                forward(). Examples: token_type_ids (BERT), inputs_embeds
-                (reward models).
+            inputs (tensorrt_llm.inputs.data.PromptInputs, Sequence[tensorrt_llm.inputs.data.PromptInputs]): The prompt text or token ids.
+                It can be a single prompt or batched prompts.
+            add_special_tokens (bool): Whether to add special tokens (e.g., [CLS]/[SEP]) during tokenization. Defaults to True.
+            model_kwargs (Any): Model-specific inputs passed through to the model's forward(). Examples: token_type_ids (BERT),
+                inputs_embeds (reward models).
 
         Returns:
-            EncoderOutput or List[EncoderOutput] with logits/embeddings.
+            Union[tensorrt_llm.llmapi.llm.EncoderOutput, List[tensorrt_llm.llmapi.llm.EncoderOutput]]: The encoder output(s) containing logits or embeddings.
 
         Raises:
             RuntimeError: If encode_only mode is not enabled.
