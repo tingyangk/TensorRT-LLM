@@ -27,8 +27,8 @@ l0_a100:
     - unittest/executor/test_rpc_proxy.py
     - unittest/executor/test_rpc_worker.py
     # llm.encode() accuracy
-    - accuracy/test_llm_api_pytorch_encode.py::TestEncoderEncode::test_encode_matches_huggingface[bert-yelp]
-    - accuracy/test_llm_api_pytorch_encode.py::TestEncoderEncode::test_encode_matches_huggingface[qwen2.5-prm-7b]
+    - accuracy/test_llm_api_pytorch_encode.py::TestEncoderEncode::test_encode_matches_huggingface_classification[bert-yelp]
+    - accuracy/test_llm_api_pytorch_encode.py::TestEncoderEncode::test_encode_matches_huggingface_per_token_reward[qwen2.5-prm-7b]
     - accuracy/test_llm_api_pytorch_encode.py::TestDecoderEncode::test_encode_matches_huggingface[tinyllama-1.1b]
     - accuracy/test_llm_api_pytorch_encode.py::TestDecoderEncode::test_encode_matches_huggingface[gemma-3-1b]
     - accuracy/test_llm_api_pytorch_encode.py::TestDecoderEncode::test_encode_matches_huggingface[phi-4-mini]
