@@ -488,6 +488,16 @@ def test_llmapi_unit_tests(tritonserver_test_root, test_name, llm_root):
         llm_root)
 
 
+@pytest.mark.parametrize("test_name", ["llmapi-encode-unit-tests"],
+                         indirect=True)
+def test_llmapi_encode_unit_tests(tritonserver_test_root, test_name, llm_root):
+    run_shell_command(
+        f"cd {llm_root}/triton_backend && "
+        "PYTHONPATH=all_models/llmapi_encode/tensorrt_llm/1 "
+        "python3 -m pytest all_models/tests/test_llmapi_encode_python_backend.py",
+        llm_root)
+
+
 @pytest.mark.parametrize("test_name", ["cpp-unit-tests"], indirect=True)
 def test_cpp_unit_tests(tritonserver_test_root, test_name, llm_root):
     # Build the inflight_batcher_llm

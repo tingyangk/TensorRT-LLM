@@ -203,6 +203,7 @@ l0_a30:
   - triton_server/test_triton.py::test_python_multimodal_encoders_unit_tests[python-multimodal-encoders-unit-tests]
   - triton_server/test_triton.py::test_triton_extensive[triton-extensive]
   - triton_server/test_triton.py::test_llmapi_unit_tests[llmapi-unit-tests]
+  - triton_server/test_triton.py::test_llmapi_encode_unit_tests[llmapi-encode-unit-tests]
   - triton_server/test_triton_llm.py::test_gpt_350m_python_backend[accuracy]
   - triton_server/test_triton_llm.py::test_gpt_350m_python_backend[e2e]
   - triton_server/test_triton_llm.py::test_gpt_350m_ifb[test_basic-False-1---False-True-False-0-128-enableDecoupleMode-inflight_fused_batching-disableTrtOverlap--max_utilization---1-1-1-True-tensorrt_llm_bls]

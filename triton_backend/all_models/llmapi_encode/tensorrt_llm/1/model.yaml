@@ -1,0 +1,31 @@
+# ======= Model Configuration =======
+# Used by model.py to initialize the LLM engine and tokenizer.
+#
+# This example uses BERT for binary sentiment classification.
+model: textattack/bert-base-uncased-yelp-polarity
+backend: "pytorch"
+
+# Enable the batch-forward encode() path.
+encode_only: true
+
+# Recommended to enable: torch.compile fuses element-wise
+# kernels (LayerNorm, GELU, residual adds) for better performance.
+torch_compile_config:
+  enable_fullgraph: true
+  enable_inductor: true
+  enable_piecewise_cuda_graph: false
+
+# --- Sizing parameters (IMPORTANT: tune these for your workload) ---
+# These control pre-allocated CUDA buffer sizes in the model engine.
+#
+# max_seq_len: longest input sequence the model will accept. The
+#   tokenizer truncates inputs to this length. For BERT, 512 is the
+#   model's architectural limit.
+# max_batch_size: largest batch Triton's dynamic batcher will form.
+#   Should match max_batch_size in config.pbtxt.
+# max_num_tokens: total tokens across ALL sequences in a single batch.
+#   Must be >= max_batch_size * expected_avg_seq_len. Example: 64
+#   requests averaging 128 tokens each = 8192 total tokens.
+max_seq_len: 512
+max_batch_size: 64
+max_num_tokens: 8192
